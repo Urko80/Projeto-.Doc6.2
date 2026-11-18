@@ -29,8 +29,10 @@
 
 #include "web_servo_api.h"
 #include "config.h"
+#include "doc_motion.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <cstdint>
 
@@ -94,6 +96,9 @@ static bool s_leg_left_enabled = false;
 static bool s_leg_right_enabled = false;
 static uint16_t s_wheel_left_us = WHEEL_LEFT_STOP_US;
 static uint16_t s_wheel_right_us = WHEEL_RIGHT_STOP_US;
+// DOC — neutro das rodas em tempo de execução (ajustável pelo painel via doc_motion).
+static uint16_t s_stop_left = WHEEL_LEFT_STOP_US;
+static uint16_t s_stop_right = WHEEL_RIGHT_STOP_US;
 static TickType_t s_last_wheel_command = 0;
 
 static esp_err_t PcaWrite(uint8_t reg, uint8_t value) {
@@ -172,8 +177,8 @@ static esp_err_t PcaInitialize() {
     // Mantém as pernas sem sinal PWM para evitar movimento inesperado ao conectar.
     // As rodas recebem o pulso neutro calibrado para solicitar parada.
     if ((err = PcaSetChannelOff(0)) != ESP_OK) return err;
-    if ((err = PcaSetPulse(1, WHEEL_LEFT_STOP_US)) != ESP_OK) return err;
-    if ((err = PcaSetPulse(2, WHEEL_RIGHT_STOP_US)) != ESP_OK) return err;
+    if ((err = PcaSetPulse(1, s_stop_left)) != ESP_OK) return err;
+    if ((err = PcaSetPulse(2, s_stop_right)) != ESP_OK) return err;
     if ((err = PcaSetChannelOff(3)) != ESP_OK) return err;
     // DOC FIM
     return ESP_OK;
@@ -239,12 +244,23 @@ static esp_err_t StatusHandler(httpd_req_t* req) {
         "\"wheels\":{\"left_us\":%u,\"right_us\":%u,\"stop_us\":%u}}",
         s_leg_left_us, s_leg_right_us,
         s_leg_left_enabled ? "true" : "false", s_leg_right_enabled ? "true" : "false",
-        SERVO_MIN_US, SERVO_MAX_US, s_wheel_left_us, s_wheel_right_us, WHEEL_LEFT_STOP_US);
+        SERVO_MIN_US, SERVO_MAX_US, s_wheel_left_us, s_wheel_right_us, s_stop_left);
     SendJson(req, json);
     return ESP_OK;
 }
 
+// DOC INÍCIO — enquanto o controlador de movimento (voz/painel) executa, os endpoints
+// brutos recusam comandos para não brigar pelos mesmos canais do PCA9685.
+static bool RejectIfMotionBusy(httpd_req_t* req) {
+    if (!doc_motion::IsBusy()) return false;
+    SendJson(req, "{\"ok\":false,\"error\":\"motion_active_stop_first\"}", "409 Conflict");
+    return true;
+}
+// DOC FIM
+
 static esp_err_t ServoHandler(httpd_req_t* req) {
+    if (RejectIfMotionBusy(req)) return ESP_OK;
+    doc_motion::InvalidateLegPosition();  // DOC — pernas movidas por fora do controlador
     char body[128];
     cJSON* root = ParseBody(req, body, sizeof(body));
     if (!root) {
@@ -286,6 +302,8 @@ static esp_err_t ServoHandler(httpd_req_t* req) {
 }
 
 static esp_err_t LegsHandler(httpd_req_t* req) {
+    if (RejectIfMotionBusy(req)) return ESP_OK;
+    doc_motion::InvalidateLegPosition();  // DOC — pernas movidas por fora do controlador
     char body[160];
     cJSON* root = ParseBody(req, body, sizeof(body));
     if (!root) {
@@ -332,16 +350,17 @@ static esp_err_t LegsHandler(httpd_req_t* req) {
 }
 
 static esp_err_t StopWheelsLocked() {
-    esp_err_t err = PcaSetPulse(1, WHEEL_LEFT_STOP_US);
-    if (err == ESP_OK) err = PcaSetPulse(2, WHEEL_RIGHT_STOP_US);
+    esp_err_t err = PcaSetPulse(1, s_stop_left);
+    if (err == ESP_OK) err = PcaSetPulse(2, s_stop_right);
     if (err == ESP_OK) {
-        s_wheel_left_us = WHEEL_LEFT_STOP_US;
-        s_wheel_right_us = WHEEL_RIGHT_STOP_US;
+        s_wheel_left_us = s_stop_left;
+        s_wheel_right_us = s_stop_right;
     }
     return err;
 }
 
 static esp_err_t StopHandler(httpd_req_t* req) {
+    doc_motion::Stop();  // DOC — cancela também movimento de voz/painel
     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         SendJson(req, "{\"ok\":false,\"error\":\"busy\"}", "503 Service Unavailable");
         return ESP_OK;
@@ -366,13 +385,14 @@ static bool ParseWheel(const cJSON* root, const char* key, bool is_left, uint16_
         return true;
     }
     if (strcmp(value->valuestring, "stop") == 0) {
-        *pulse = is_left ? WHEEL_LEFT_STOP_US : WHEEL_RIGHT_STOP_US;
+        *pulse = is_left ? s_stop_left : s_stop_right;
         return true;
     }
     return false;
 }
 
 static esp_err_t WheelsHandler(httpd_req_t* req) {
+    if (RejectIfMotionBusy(req)) return ESP_OK;
     char body[160];
     cJSON* root = ParseBody(req, body, sizeof(body));
     if (!root) {
@@ -415,8 +435,8 @@ static void WheelWatchdogTask(void*) {
         if (s_mutex == nullptr || xSemaphoreTake(s_mutex, 0) != pdTRUE) continue;
         const TickType_t now = xTaskGetTickCount();
         const TickType_t timeout = pdMS_TO_TICKS(WHEEL_WATCHDOG_MS);
-        const bool moving = s_wheel_left_us != WHEEL_LEFT_STOP_US ||
-                            s_wheel_right_us != WHEEL_RIGHT_STOP_US;
+        const bool moving = s_wheel_left_us != s_stop_left ||
+                            s_wheel_right_us != s_stop_right;
         if (moving && (now - s_last_wheel_command) >= timeout) {
             ESP_LOGW(TAG, "Watchdog: parando rodas após ausência de comando");
             StopWheelsLocked();
@@ -424,6 +444,231 @@ static void WheelWatchdogTask(void*) {
         xSemaphoreGive(s_mutex);
     }
 }
+
+// DOC INÍCIO — movimento: modo, direção, ajustes (usa doc_motion)
+static void SendJsonObject(httpd_req_t* req, cJSON* obj, const char* status = "200 OK") {
+    char* text = (obj != nullptr) ? cJSON_PrintUnformatted(obj) : nullptr;
+    if (text == nullptr) {
+        SendJson(req, "{\"ok\":false,\"error\":\"out_of_memory\"}", "500 Internal Server Error");
+    } else {
+        SendJson(req, text, status);
+        cJSON_free(text);
+    }
+    if (obj != nullptr) cJSON_Delete(obj);
+}
+
+static cJSON* TuningToJson(const doc_motion::Tuning& t) {
+    cJSON* o = cJSON_CreateObject();
+    if (o == nullptr) return nullptr;
+    cJSON_AddNumberToObject(o, "speed_pct", t.speed_pct);
+    cJSON_AddNumberToObject(o, "wl_stop", t.left.stop_us);
+    cJSON_AddNumberToObject(o, "wl_cw", t.left.cw_us);
+    cJSON_AddNumberToObject(o, "wl_ccw", t.left.ccw_us);
+    cJSON_AddBoolToObject(o, "wl_fwd_cw", t.left.forward_is_cw);
+    cJSON_AddNumberToObject(o, "wl_trim", t.left.trim_pct);
+    cJSON_AddNumberToObject(o, "wr_stop", t.right.stop_us);
+    cJSON_AddNumberToObject(o, "wr_cw", t.right.cw_us);
+    cJSON_AddNumberToObject(o, "wr_ccw", t.right.ccw_us);
+    cJSON_AddBoolToObject(o, "wr_fwd_cw", t.right.forward_is_cw);
+    cJSON_AddNumberToObject(o, "wr_trim", t.right.trim_pct);
+    cJSON_AddNumberToObject(o, "leg_center_l", t.leg_center_left_us);
+    cJSON_AddNumberToObject(o, "leg_center_r", t.leg_center_right_us);
+    cJSON_AddNumberToObject(o, "leg_amp", t.leg_amplitude_us);
+    cJSON_AddBoolToObject(o, "leg_inv_l", t.leg_left_inverted);
+    cJSON_AddBoolToObject(o, "leg_inv_r", t.leg_right_inverted);
+    cJSON_AddNumberToObject(o, "step_ms", t.step_hold_ms);
+    cJSON_AddNumberToObject(o, "push_us", t.push_us);
+    cJSON_AddNumberToObject(o, "push_ms", t.push_ms);
+    cJSON_AddNumberToObject(o, "obstacle_mm", t.obstacle_mm);
+    cJSON_AddNumberToObject(o, "leg_sit_l", t.leg_sit_left_us);
+    cJSON_AddNumberToObject(o, "leg_sit_r", t.leg_sit_right_us);
+    cJSON_AddNumberToObject(o, "posture_ms", t.posture_ms);
+    return o;
+}
+
+// Sobrepõe apenas os campos presentes no JSON (tipos errados são ignorados; os limites
+// são verificados depois por doc_motion::SetTuning).
+static void OverlayU16(const cJSON* root, const char* key, uint16_t* out) {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (cJSON_IsNumber(item) && item->valuedouble >= 0 && item->valuedouble <= 65535) {
+        *out = static_cast<uint16_t>(item->valueint);
+    }
+}
+static void OverlayU8(const cJSON* root, const char* key, uint8_t* out) {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (cJSON_IsNumber(item) && item->valuedouble >= 0 && item->valuedouble <= 255) {
+        *out = static_cast<uint8_t>(item->valueint);
+    }
+}
+static void OverlayBool(const cJSON* root, const char* key, bool* out) {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (cJSON_IsBool(item)) *out = cJSON_IsTrue(item);
+}
+
+static esp_err_t MotionStatusHandler(httpd_req_t* req) {
+    cJSON* root = cJSON_CreateObject();
+    if (root == nullptr) {
+        SendJson(req, "{\"ok\":false,\"error\":\"out_of_memory\"}", "500 Internal Server Error");
+        return ESP_OK;
+    }
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddBoolToObject(root, "ready", doc_motion::IsReady());
+    cJSON_AddStringToObject(root, "mode", doc_motion::ModeName(doc_motion::GetMode()));
+    cJSON_AddStringToObject(root, "posture", doc_motion::PostureName());
+    cJSON_AddBoolToObject(root, "busy", doc_motion::IsBusy());
+    cJSON_AddNumberToObject(root, "max_wheel_ms", doc_motion::kMaxWheelMoveMs);
+    cJSON_AddNumberToObject(root, "max_leg_ms", doc_motion::kMaxLegMoveMs);
+    cJSON_AddItemToObject(root, "tuning", TuningToJson(doc_motion::GetTuning()));
+    SendJsonObject(req, root);
+    return ESP_OK;
+}
+
+static esp_err_t ModeHandler(httpd_req_t* req) {
+    char body[96];
+    cJSON* root = ParseBody(req, body, sizeof(body));
+    if (!root) {
+        SendJson(req, "{\"ok\":false,\"error\":\"invalid_json_or_body\"}", "400 Bad Request");
+        return ESP_OK;
+    }
+    const cJSON* mode_item = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    doc_motion::Mode mode = doc_motion::Mode::kWheels;
+    const bool valid = cJSON_IsString(mode_item) && doc_motion::ParseMode(mode_item->valuestring, &mode);
+    cJSON_Delete(root);
+    if (!valid) {
+        SendJson(req, "{\"ok\":false,\"error\":\"mode_must_be_wheels_or_legs\"}", "400 Bad Request");
+        return ESP_OK;
+    }
+    if (doc_motion::SetMode(mode) != ESP_OK) {
+        SendJson(req, "{\"ok\":false,\"error\":\"motion_not_ready\"}", "503 Service Unavailable");
+        return ESP_OK;
+    }
+    char json[64];
+    snprintf(json, sizeof(json), "{\"ok\":true,\"mode\":\"%s\"}", doc_motion::ModeName(mode));
+    SendJson(req, json);
+    return ESP_OK;
+}
+
+static esp_err_t MoveHandler(httpd_req_t* req) {
+    char body[160];
+    cJSON* root = ParseBody(req, body, sizeof(body));
+    if (!root) {
+        SendJson(req, "{\"ok\":false,\"error\":\"invalid_json_or_body\"}", "400 Bad Request");
+        return ESP_OK;
+    }
+    const cJSON* dir_item = cJSON_GetObjectItemCaseSensitive(root, "direction");
+    const cJSON* dur_item = cJSON_GetObjectItemCaseSensitive(root, "duration_ms");
+    const cJSON* mode_item = cJSON_GetObjectItemCaseSensitive(root, "mode");
+
+    doc_motion::Dir dir = doc_motion::Dir::kStop;
+    if (!cJSON_IsString(dir_item) || !doc_motion::ParseDir(dir_item->valuestring, &dir)) {
+        cJSON_Delete(root);
+        SendJson(req, "{\"ok\":false,\"error\":\"direction_must_be_forward_backward_left_right_stop\"}", "400 Bad Request");
+        return ESP_OK;
+    }
+    uint32_t duration = 1000;
+    if (cJSON_IsNumber(dur_item) && dur_item->valueint > 0) {
+        duration = static_cast<uint32_t>(dur_item->valueint);
+    }
+    if (cJSON_IsString(mode_item)) {
+        doc_motion::Mode mode = doc_motion::Mode::kWheels;
+        if (!doc_motion::ParseMode(mode_item->valuestring, &mode)) {
+            cJSON_Delete(root);
+            SendJson(req, "{\"ok\":false,\"error\":\"mode_must_be_wheels_or_legs\"}", "400 Bad Request");
+            return ESP_OK;
+        }
+        if (mode != doc_motion::GetMode()) doc_motion::SetMode(mode);
+    }
+    cJSON_Delete(root);
+
+    const esp_err_t err = doc_motion::Move(dir, duration);
+    if (err == ESP_ERR_INVALID_STATE) {
+        SendJson(req, "{\"ok\":false,\"error\":\"motion_not_ready\"}", "503 Service Unavailable");
+    } else if (err != ESP_OK) {
+        SendJson(req, "{\"ok\":false,\"error\":\"move_failed\"}", "500 Internal Server Error");
+    } else {
+        SendJson(req, "{\"ok\":true}");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t TuneHandler(httpd_req_t* req) {
+    char body[900];
+    cJSON* root = ParseBody(req, body, sizeof(body));
+    if (!root) {
+        SendJson(req, "{\"ok\":false,\"error\":\"invalid_json_or_body\"}", "400 Bad Request");
+        return ESP_OK;
+    }
+    doc_motion::Tuning t = doc_motion::GetTuning();
+    OverlayU8(root, "speed_pct", &t.speed_pct);
+    OverlayU16(root, "wl_stop", &t.left.stop_us);
+    OverlayU16(root, "wl_cw", &t.left.cw_us);
+    OverlayU16(root, "wl_ccw", &t.left.ccw_us);
+    OverlayBool(root, "wl_fwd_cw", &t.left.forward_is_cw);
+    OverlayU8(root, "wl_trim", &t.left.trim_pct);
+    OverlayU16(root, "wr_stop", &t.right.stop_us);
+    OverlayU16(root, "wr_cw", &t.right.cw_us);
+    OverlayU16(root, "wr_ccw", &t.right.ccw_us);
+    OverlayBool(root, "wr_fwd_cw", &t.right.forward_is_cw);
+    OverlayU8(root, "wr_trim", &t.right.trim_pct);
+    OverlayU16(root, "leg_center_l", &t.leg_center_left_us);
+    OverlayU16(root, "leg_center_r", &t.leg_center_right_us);
+    OverlayU16(root, "leg_amp", &t.leg_amplitude_us);
+    OverlayBool(root, "leg_inv_l", &t.leg_left_inverted);
+    OverlayBool(root, "leg_inv_r", &t.leg_right_inverted);
+    OverlayU16(root, "step_ms", &t.step_hold_ms);
+    OverlayU16(root, "push_us", &t.push_us);
+    OverlayU16(root, "push_ms", &t.push_ms);
+    OverlayU16(root, "obstacle_mm", &t.obstacle_mm);
+    OverlayU16(root, "leg_sit_l", &t.leg_sit_left_us);
+    OverlayU16(root, "leg_sit_r", &t.leg_sit_right_us);
+    OverlayU16(root, "posture_ms", &t.posture_ms);
+    cJSON_Delete(root);
+
+    const esp_err_t err = doc_motion::SetTuning(t);
+    if (err == ESP_ERR_INVALID_ARG) {
+        SendJson(req, "{\"ok\":false,\"error\":\"value_out_of_range\"}", "400 Bad Request");
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        SendJson(req, "{\"ok\":false,\"error\":\"motion_not_ready\"}", "503 Service Unavailable");
+        return ESP_OK;
+    }
+    cJSON* out = cJSON_CreateObject();
+    if (out != nullptr) {
+        cJSON_AddBoolToObject(out, "ok", true);
+        cJSON_AddItemToObject(out, "tuning", TuningToJson(doc_motion::GetTuning()));
+    }
+    SendJsonObject(req, out);
+    return ESP_OK;
+}
+
+static esp_err_t TuneResetHandler(httpd_req_t* req) {
+    if (doc_motion::ResetTuning() != ESP_OK) {
+        SendJson(req, "{\"ok\":false,\"error\":\"motion_not_ready\"}", "503 Service Unavailable");
+        return ESP_OK;
+    }
+    cJSON* out = cJSON_CreateObject();
+    if (out != nullptr) {
+        cJSON_AddBoolToObject(out, "ok", true);
+        cJSON_AddItemToObject(out, "tuning", TuningToJson(doc_motion::GetTuning()));
+    }
+    SendJsonObject(req, out);
+    return ESP_OK;
+}
+
+// Solta o torque dos servos das pernas (o corpo pode ceder); só usar com o robô apoiado.
+static esp_err_t ReleaseHandler(httpd_req_t* req) {
+    doc_motion::Stop();
+    doc_motion::InvalidateLegPosition();
+    const esp_err_t err = DocServoLegsRelease();
+    if (err != ESP_OK) {
+        SendJson(req, "{\"ok\":false,\"error\":\"pca_write_failed\"}", "500 Internal Server Error");
+    } else {
+        SendJson(req, "{\"ok\":true,\"legs\":\"released\"}");
+    }
+    return ESP_OK;
+}
+// DOC FIM — movimento
 
 static esp_err_t RegisterUri(httpd_handle_t server, const char* uri, httpd_method_t method,
                              esp_err_t (*handler)(httpd_req_t*)) {
@@ -441,35 +686,139 @@ extern "C" void DocWebServoApiSetSharedBus(i2c_master_bus_handle_t bus) {
     s_shared_bus = bus;
 }
 
-void DocWebServoApiStart(void) {
-    if (s_started) return;
+// DOC INÍCIO — funções usadas por doc_motion.cc (mesmo mutex e mesmo watchdog)
+extern "C" bool DocServoIsReady(void) {
+    return s_mutex != nullptr && s_pca != nullptr;
+}
+
+extern "C" void DocServoSetWheelStop(uint16_t left_us, uint16_t right_us) {
+    s_stop_left = left_us;
+    s_stop_right = right_us;
+}
+
+extern "C" esp_err_t DocServoWheelsWrite(uint16_t left_us, uint16_t right_us) {
+    if (!DocServoIsReady()) return ESP_ERR_INVALID_STATE;
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    esp_err_t err = PcaSetPulse(1, left_us);
+    if (err == ESP_OK) err = PcaSetPulse(2, right_us);
+    if (err == ESP_OK) {
+        s_wheel_left_us = left_us;
+        s_wheel_right_us = right_us;
+        s_last_wheel_command = xTaskGetTickCount();  // atualiza o watchdog
+    } else {
+        StopWheelsLocked();
+    }
+    xSemaphoreGive(s_mutex);
+    return err;
+}
+
+extern "C" esp_err_t DocServoLegsWrite(uint16_t left_us, uint16_t right_us) {
+    // Faixa ampla (posturas em pé/sentado precisam de ~90 graus); a validação fina está em doc_motion.
+    if (left_us < DOC_LEG_ABS_MIN_US || left_us > DOC_LEG_ABS_MAX_US ||
+        right_us < DOC_LEG_ABS_MIN_US || right_us > DOC_LEG_ABS_MAX_US) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!DocServoIsReady()) return ESP_ERR_INVALID_STATE;
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    esp_err_t err = PcaSetPulse(0, left_us);
+    if (err == ESP_OK) {
+        s_leg_left_us = left_us;
+        s_leg_left_enabled = true;
+        err = PcaSetPulse(3, right_us);
+        if (err == ESP_OK) {
+            s_leg_right_us = right_us;
+            s_leg_right_enabled = true;
+        }
+    }
+    xSemaphoreGive(s_mutex);
+    return err;
+}
+
+extern "C" esp_err_t DocServoLegsRelease(void) {
+    if (!DocServoIsReady()) return ESP_ERR_INVALID_STATE;
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    esp_err_t err = PcaSetChannelOff(0);
+    if (err == ESP_OK) err = PcaSetChannelOff(3);
+    if (err == ESP_OK) {
+        s_leg_left_enabled = false;
+        s_leg_right_enabled = false;
+    }
+    xSemaphoreGive(s_mutex);
+    return err;
+}
+// DOC FIM
+
+// Libera tudo o que Start() criou (idempotente). Chamado em falhas e em Stop().
+static void ReleaseHardwareAndState() {
+    if (s_watchdog_task != nullptr) {
+        // Pega o mutex antes para não apagar a task enquanto ela o segura.
+        const bool locked = s_mutex != nullptr && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) == pdTRUE;
+        vTaskDelete(s_watchdog_task);
+        s_watchdog_task = nullptr;
+        if (locked) xSemaphoreGive(s_mutex);
+    }
+    if (s_pca != nullptr && s_i2c_bus != nullptr) {
+        i2c_master_bus_rm_device(s_pca);
+    }
+    s_pca = nullptr;
+    if (s_i2c_bus != nullptr && s_i2c_bus_owned) {
+        i2c_del_master_bus(s_i2c_bus);
+    }
+    s_i2c_bus = nullptr;
+    s_i2c_bus_owned = false;
+    if (s_mutex != nullptr) {
+        vSemaphoreDelete(s_mutex);
+        s_mutex = nullptr;
+    }
+    s_started = false;
+}
+
+extern "C" bool DocWebServoApiStart(void) {
+    if (s_started) return true;
 
     s_mutex = xSemaphoreCreateMutex();
     if (s_mutex == nullptr) {
         ESP_LOGE(TAG, "Falha ao criar mutex");
-        return;
+        return false;
+    }
+
+    // DOC — carrega os ajustes (neutro das rodas etc.) antes de inicializar o PCA9685.
+    if (doc_motion::Start() != ESP_OK) {
+        ESP_LOGE(TAG, "Falha ao iniciar o controlador de movimento");
+        ReleaseHardwareAndState();
+        return false;
     }
 
     esp_err_t err = PcaInitialize();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Falha ao inicializar PCA9685: %s", esp_err_to_name(err));
-        return;
+        doc_motion::Shutdown();
+        ReleaseHardwareAndState();
+        return false;
     }
+    s_wheel_left_us = s_stop_left;
+    s_wheel_right_us = s_stop_right;
 
     s_last_wheel_command = xTaskGetTickCount();
     if (xTaskCreate(WheelWatchdogTask, "doc_wheel_wd", 2048, nullptr, 4, &s_watchdog_task) != pdPASS) {
         ESP_LOGE(TAG, "Falha ao criar watchdog das rodas");
-        return;
+        doc_motion::Shutdown();
+        ReleaseHardwareAndState();
+        return false;
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 32;   // DOC — 12 originais + rotas de movimento (com OPTIONS)
+    config.stack_size = 6144;       // DOC — handlers de ajuste usam cJSON e buffers maiores
     config.lru_purge_enable = true;
     err = httpd_start(&s_http, &config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Falha ao iniciar servidor HTTP: %s", esp_err_to_name(err));
-        return;
+        s_http = nullptr;
+        doc_motion::Shutdown();
+        ReleaseHardwareAndState();
+        return false;
     }
 
     // DOC INÍCIO — página inicial para acesso direto pelo celular
@@ -482,14 +831,25 @@ void DocWebServoApiStart(void) {
     RegisterUri(s_http, "/api/legs", HTTP_POST, LegsHandler);
     RegisterUri(s_http, "/api/wheels", HTTP_POST, WheelsHandler);
     RegisterUri(s_http, "/api/stop", HTTP_POST, StopHandler);
-    RegisterUri(s_http, "/api/status", HTTP_OPTIONS, OptionsHandler);
-    RegisterUri(s_http, "/api/servo", HTTP_OPTIONS, OptionsHandler);
-    RegisterUri(s_http, "/api/legs", HTTP_OPTIONS, OptionsHandler);
-    RegisterUri(s_http, "/api/wheels", HTTP_OPTIONS, OptionsHandler);
-    RegisterUri(s_http, "/api/stop", HTTP_OPTIONS, OptionsHandler);
+    // DOC — movimento (modo, direção, ajustes)
+    RegisterUri(s_http, "/api/motion", HTTP_GET, MotionStatusHandler);
+    RegisterUri(s_http, "/api/mode", HTTP_POST, ModeHandler);
+    RegisterUri(s_http, "/api/move", HTTP_POST, MoveHandler);
+    RegisterUri(s_http, "/api/tune", HTTP_POST, TuneHandler);
+    RegisterUri(s_http, "/api/tune/reset", HTTP_POST, TuneResetHandler);
+    RegisterUri(s_http, "/api/release", HTTP_POST, ReleaseHandler);
+
+    static const char* const kOptionsRoutes[] = {
+        "/api/status", "/api/servo", "/api/legs", "/api/wheels", "/api/stop",
+        "/api/motion", "/api/mode", "/api/move", "/api/tune", "/api/tune/reset", "/api/release",
+    };
+    for (const char* route : kOptionsRoutes) {
+        RegisterUri(s_http, route, HTTP_OPTIONS, OptionsHandler);
+    }
 
     s_started = true;
-    ESP_LOGI(TAG, "Painel web: http://<IP-DO-DOC>/ | API: /api/status");
+    ESP_LOGI(TAG, "Painel web: http://<IP-DO-DOC>/ | API: /api/status, /api/motion");
+    return true;
 }
 
 extern "C" void DocWebServoApiStop(void) {
@@ -498,29 +858,12 @@ extern "C" void DocWebServoApiStop(void) {
         httpd_stop(s_http);
         s_http = nullptr;
     }
+    doc_motion::Shutdown();  // para o movimento e encerra a task
 
     if (s_mutex != nullptr && s_pca != nullptr &&
         xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
         StopWheelsLocked();
         xSemaphoreGive(s_mutex);
     }
-
-    if (s_watchdog_task != nullptr) {
-        vTaskDelete(s_watchdog_task);
-        s_watchdog_task = nullptr;
-    }
-    if (s_pca != nullptr && s_i2c_bus != nullptr) {
-        i2c_master_bus_rm_device(s_pca);
-        s_pca = nullptr;
-    }
-    if (s_i2c_bus != nullptr && s_i2c_bus_owned) {
-        i2c_del_master_bus(s_i2c_bus);
-    }
-    s_i2c_bus = nullptr;
-    s_i2c_bus_owned = false;
-    if (s_mutex != nullptr) {
-        vSemaphoreDelete(s_mutex);
-        s_mutex = nullptr;
-    }
-    s_started = false;
+    ReleaseHardwareAndState();
 }

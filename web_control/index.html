@@ -16,7 +16,7 @@
     h1 { font-size:clamp(1.35rem,4vw,2rem); margin:0; }
     .sub,.muted { color:var(--muted); font-size:.9rem; }
     .status { margin-left:auto; border:1px solid var(--line); border-radius:999px; padding:7px 10px; color:var(--warn); font-size:.78rem; white-space:nowrap; }
-    nav { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:16px; }
+    nav { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:16px; }
     nav button { border:1px solid var(--line); background:var(--panel); color:var(--muted); padding:13px 8px; border-radius:12px; font-weight:700; cursor:pointer; }
     nav button[aria-selected="true"] { background:#21465e; border-color:var(--accent); color:var(--text); }
     section.panel { background:rgba(19,38,58,.94); border:1px solid var(--line); border-radius:18px; padding:18px; margin:12px 0; }
@@ -39,7 +39,21 @@
     .status-line { min-height:1.4em; color:var(--muted); font-size:.88rem; margin-top:12px; }
     .field { display:grid; gap:6px; margin:12px 0; }
     input[type=number],input[type=text] { width:100%; background:#091521; color:var(--text); border:1px solid var(--line); border-radius:9px; padding:10px; }
-    @media(max-width:560px) { main{padding:16px 11px 32px} .status{font-size:.68rem;padding:6px 8px} .grid2{grid-template-columns:1fr} section.panel{padding:14px} }
+    /* DOC INÍCIO — estilos do controle de movimento e da calibração */
+    .seg { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:12px 0; }
+    .seg button { border:1px solid var(--line); background:var(--panel2); color:var(--muted); padding:14px 8px; border-radius:12px; font-weight:800; cursor:pointer; font-size:1rem; }
+    .seg button[aria-pressed="true"] { background:#21465e; border-color:var(--accent); color:var(--text); }
+    .dpad { display:grid; grid-template-columns:repeat(3,92px); grid-template-rows:repeat(3,92px); gap:10px; justify-content:center; margin:18px 0; touch-action:none; user-select:none; -webkit-user-select:none; }
+    .dpad button { border:1px solid var(--line); background:var(--panel2); color:var(--text); border-radius:18px; font-size:2rem; font-weight:800; cursor:pointer; touch-action:none; }
+    .dpad button.hold { background:var(--accent); color:#06251f; border-color:var(--accent); }
+    .dpad button.center { background:#572b35; border-color:#a94c5b; font-size:1.1rem; }
+    .tune-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px 12px; }
+    .tune-grid .field { margin:6px 0; }
+    .tune-grid label { font-size:.85rem; color:var(--muted); }
+    .check { display:flex; align-items:center; gap:8px; margin:10px 0; }
+    .check input { width:20px; height:20px; accent-color:var(--accent); }
+    /* DOC FIM */
+    @media(max-width:560px) { main{padding:16px 11px 32px} .status{font-size:.68rem;padding:6px 8px} .grid2{grid-template-columns:1fr} section.panel{padding:14px} .dpad{grid-template-columns:repeat(3,78px);grid-template-rows:repeat(3,78px)} .tune-grid{grid-template-columns:1fr} nav button{font-size:.8rem;padding:12px 4px} }
     /* DOC FIM — ESTILO RESPONSIVO DO PAINEL */
   </style>
 </head>
@@ -52,7 +66,8 @@
   </header>
 
   <nav aria-label="Abas de controle">
-    <button type="button" data-tab="legs" aria-selected="true">🦿 Pernas</button>
+    <button type="button" data-tab="drive" aria-selected="true">🎮 Controle</button>
+    <button type="button" data-tab="legs" aria-selected="false">🦿 Pernas</button>
     <button type="button" data-tab="wheels" aria-selected="false">⚙️ Rodas</button>
     <button type="button" data-tab="calibration" aria-selected="false">🎛️ Calibração</button>
   </nav>
@@ -65,8 +80,35 @@
     <p class="muted">A API ainda não tem autenticação. Use somente em rede confiável. Os comandos das rodas estão habilitados; faça os testes com as rodas suspensas e use PARAR RODAS para interromper o movimento.</p>
   </section>
 
+  <!-- DOC INÍCIO — ABA CONTROLE: MODO RODAS / MODO PERNAS + DIRECIONAL -->
+  <section class="panel tab-panel" id="tab-drive">
+    <h2>Controle de movimento</h2>
+    <p class="muted">Escolha o modo e segure uma seta para andar. Ao soltar, o robô para. O firmware também para sozinho se a conexão cair.</p>
+    <div class="notice"><strong>Troca de modo = troca de postura.</strong> Modo Rodas: o robô dobra as pernas e senta sobre as rodas. Modo Pernas: ele levanta. A troca leva cerca de 2 s e as rodas só andam depois que ele terminar. <strong>Ligue o robô sempre EM PÉ.</strong></div>
+    <div class="seg" role="group" aria-label="Modo de locomoção">
+      <button type="button" id="modeWheels" aria-pressed="true">⚙️ Modo Rodas</button>
+      <button type="button" id="modeLegs" aria-pressed="false">🦿 Modo Pernas</button>
+    </div>
+    <div class="dpad" id="dpad">
+      <span></span><button type="button" data-dir="forward" aria-label="Frente">▲</button><span></span>
+      <button type="button" data-dir="left" aria-label="Girar à esquerda">◀</button>
+      <button type="button" class="center" id="dpadStop" aria-label="Parar">PARAR</button>
+      <button type="button" data-dir="right" aria-label="Girar à direita">▶</button>
+      <span></span><button type="button" data-dir="backward" aria-label="Trás">▼</button><span></span>
+    </div>
+    <div class="field"><label for="driveBehavior">Comportamento do botão</label>
+      <select id="driveBehavior" style="width:100%;background:#091521;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:11px">
+        <option value="hold">Segurar para mover (para ao soltar)</option>
+        <option value="timed">Tocar para mover por um tempo fixo</option>
+      </select></div>
+    <div class="field"><label for="driveMs">Tempo fixo (ms) — só no modo "tocar"</label><input id="driveMs" type="number" min="200" max="5000" step="100" value="1500"></div>
+    <div class="notice">Teste primeiro com as rodas suspensas. Teclado: setas ou WASD seguram o movimento; Espaço para. A tela perdendo o foco também para o robô.</div>
+    <div class="status-line" id="motionInfo">Modo: —</div>
+  </section>
+  <!-- DOC FIM — ABA CONTROLE -->
+
   <!-- DOC INÍCIO — ABA PERNAS: SG90 NOS CANAIS 0 E 3 -->
-  <section class="panel tab-panel" id="tab-legs">
+  <section class="panel tab-panel hidden" id="tab-legs">
     <h2>Controle das pernas</h2><p class="muted">SG90 · PCA9685 · canais 0 e 3</p>
     <div class="notice">Comece com a mecânica livre e use pulsos conservadores. Os extremos definitivos ainda não foram validados.</div>
     <div class="servo">
@@ -88,27 +130,36 @@
   <!-- DOC INÍCIO — ABA RODAS: MG90S CONTÍNUOS NOS CANAIS 1 E 2 -->
   <section class="panel tab-panel hidden" id="tab-wheels">
     <h2>Controle das rodas</h2><p class="muted">MG90S contínuos · CH1 e CH2 · neutro inicial 1705 µs</p>
-    <div class="notice">A API atual aceita apenas sentidos discretos (CW, CCW ou STOP); o controle de velocidade variável ainda não está implementado. Teste com as rodas suspensas.</div>
-    <div class="servo">
-      <div class="servo-head"><h3>Velocidade variável</h3><output id="speedValue">Indisponível</output></div>
-      <input id="speed" type="range" min="0" max="30" step="5" value="0" aria-label="Velocidade variável não implementada" disabled>
-      <div class="scale"><span>Indisponível</span><span>Comandos discretos apenas</span></div>
-    </div>
-    <div class="field"><label for="direction">Comando das rodas</label><select id="direction" style="width:100%;background:#091521;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:11px"><option value="forward">Ambas CW (horário)</option><option value="reverse">Ambas CCW (anti-horário — teste 1800 µs)</option><option value="left">Giro: esquerda CCW / direita CW</option><option value="right">Giro: esquerda CW / direita CCW</option></select></div>
+    <div class="notice">Teste bruto por sentido (CW, CCW ou STOP), usando os pulsos calibrados e parando sozinho em ~1,5 s. Use para descobrir, roda por roda, qual sentido faz o robô avançar; depois marque "Frente = horário" na aba Calibração. A velocidade e o ajuste fino ficam na aba Calibração.</div>
+    <div class="field"><label for="direction">Comando das rodas</label><select id="direction" style="width:100%;background:#091521;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:11px"><option value="forward">Ambas CW (horário)</option><option value="reverse">Ambas CCW (anti-horário — teste 1800 µs)</option><option value="left">Giro: esquerda CCW / direita CW</option><option value="right">Giro: esquerda CW / direita CCW</option><option value="l_cw">Só esquerda CW</option><option value="l_ccw">Só esquerda CCW</option><option value="r_cw">Só direita CW</option><option value="r_ccw">Só direita CCW</option></select></div>
     <div class="actions"><button class="action primary" id="sendWheels">Enviar comando das rodas</button><button class="action stop" id="stopWheels">PARAR RODAS</button></div>
   </section>
   <!-- DOC FIM — ABA RODAS -->
 
-  <!-- DOC INÍCIO — ABA CALIBRAÇÃO: VALORES JÁ REGISTRADOS -->
+  <!-- DOC INÍCIO — ABA CALIBRAÇÃO: AJUSTES SALVOS NO ESP32 (NVS) -->
   <section class="panel tab-panel hidden" id="tab-calibration">
-    <h2>Registro de calibração</h2><p class="muted">Referência local; valores não são gravados no ESP32 nesta versão.</p>
-    <div class="grid2">
-      <div class="servo"><h3>MG90S · CH1</h3><p>Horário: <strong>1665 µs</strong></p><p>Neutro: <strong>1705 µs</strong></p><p>Anti-horário: <strong>1800 µs (testado nesta montagem)</strong></p></div>
-      <div class="servo"><h3>MG90S · CH2</h3><p>Horário: <strong>1665 µs</strong></p><p>Neutro: <strong>1705 µs</strong></p><p>Anti-horário: <strong>1800 µs (testado nesta montagem)</strong></p></div>
-      <div class="servo"><h3>SG90 · CH0</h3><p>Centro de teste: <strong>1500 µs</strong></p><p>Faixa inicial da API: <strong>1250–1750 µs</strong></p><p class="muted">Faixa limitada conservadoramente; confirmar no conjunto montado.</p></div>
-      <div class="servo"><h3>SG90 · CH3</h3><p>Centro testado: <strong>1500 µs</strong></p><p>Faixa inicial da API: <strong>1250–1750 µs</strong></p><p class="muted">Movimento suficiente no teste individual; limites finais dependem da mecânica montada.</p></div>
+    <h2>Calibração e velocidade</h2>
+    <p class="muted">Os valores são validados no firmware e salvos na memória do ESP32 (sobrevivem ao reinício). Aplique com o robô parado e as rodas suspensas.</p>
+    <div class="notice">Dica: com o robô parado, mude o "Neutro" de uma roda e clique em Aplicar; a roda reaplica o neutro na hora. Ajuste até ela ficar completamente parada.</div>
+    <div class="servo"><h3>Geral</h3><div class="tune-grid" id="tuneGeneral"></div></div>
+    <div class="servo"><h3>Roda esquerda · CH1</h3><div class="tune-grid" id="tuneLeft"></div></div>
+    <div class="servo"><h3>Roda direita · CH2</h3><div class="tune-grid" id="tuneRight"></div></div>
+    <div class="servo"><h3>Postura: em pé ⇄ sentado · CH0 / CH3</h3>
+      <div class="tune-grid" id="tunePosture"></div>
+      <p class="muted">"Em pé" usa o centro das pernas (campos abaixo). "Sentado" é onde as pernas ficam no Modo Rodas. Aumente os valores de sentado de 50 em 50 µs, clique em <b>Aplicar e salvar</b> e use os botões de teste, até os pés dobrarem e as rodas tocarem o chão. Se uma perna girar para o lado errado, troque o valor dela para o lado oposto do centro (ex.: 1500 − o deslocamento). Teste com o robô apoiado e confira se nenhuma peça bate no corpo.</p>
+      <div class="actions">
+        <button class="action" id="testSit">Testar: sentar (Modo Rodas)</button>
+        <button class="action" id="testStand">Testar: levantar (Modo Pernas)</button>
+      </div></div>
+    <div class="servo"><h3>Pernas (Modo Pernas) · CH0 / CH3</h3><div class="tune-grid" id="tuneLegs"></div>
+      <p class="muted">Comece com amplitude pequena e aumente aos poucos. Se uma perna inclinar para o lado errado, marque "Inverter" nela.</p></div>
+    <div class="actions">
+      <button class="action primary" id="tuneApply">Aplicar e salvar</button>
+      <button class="action" id="tuneRead">Ler do robô</button>
+      <button class="action" id="tuneReset">Restaurar padrões</button>
+      <button class="action" id="legsRelease">Soltar servos das pernas</button>
     </div>
-    <div class="notice danger-note">Os controles desta versão não persistem valores. A gravação de calibração só será ativada após implementar validação no firmware e testar os limites mecânicos.</div>
+    <div class="notice danger-note">"Soltar servos das pernas" tira o torque; o corpo pode ceder. Use só com o robô apoiado.</div>
   </section>
   <!-- DOC FIM — ABA CALIBRAÇÃO -->
 
@@ -150,11 +201,6 @@
     const output = document.getElementById(outputId);
     input.addEventListener('input', () => output.value = input.value + ' µs');
   });
-  // DOC INÍCIO — velocidade variável ainda não implementada no firmware.
-  // O controle fica desativado para não sugerir que altera a velocidade física.
-  document.getElementById('speedValue').value = 'Indisponível';
-  // DOC FIM
-
   // DOC INÍCIO — selecionar automaticamente o endereço do DOC
   // Se a página vier da própria ESP32, a API usa a mesma origem.
   // Se for aberta no servidor local do computador, mantém o IP configurado no campo.
@@ -213,14 +259,17 @@
   }));
 
   // DOC INÍCIO — enviar comandos discretos aceitos por POST /api/wheels
-  // CW usa 1665 µs; CCW usa o valor experimental 1800 µs; STOP usa 1705 µs.
-  // A API não recebe velocidade variável, por isso o slider não altera os pulsos.
+  // Teste bruto: CW/CCW/STOP com os pulsos calibrados (a velocidade fica na aba Calibração).
   document.getElementById('sendWheels').addEventListener('click', async () => {
     const commands = {
       forward: { left: 'cw', right: 'cw' },
       reverse: { left: 'ccw', right: 'ccw' },
       left: { left: 'ccw', right: 'cw' },
-      right: { left: 'cw', right: 'ccw' }
+      right: { left: 'cw', right: 'ccw' },
+      l_cw: { left: 'cw', right: 'stop' },
+      l_ccw: { left: 'ccw', right: 'stop' },
+      r_cw: { left: 'stop', right: 'cw' },
+      r_ccw: { left: 'stop', right: 'ccw' }
     };
     const direction = document.getElementById('direction').value;
     try {
@@ -242,6 +291,214 @@
     }
   });
   /* DOC FIM — NAVEGAÇÃO, CONEXÃO HTTP E COMANDOS DE PERNAS */
+
+  /* DOC INÍCIO — MOVIMENTO: MODO, DIRECIONAL E CALIBRAÇÃO */
+  const modeButtons = { wheels: document.getElementById('modeWheels'), legs: document.getElementById('modeLegs') };
+  const motionInfo = document.getElementById('motionInfo');
+  let currentMode = 'wheels';
+  let holdTimer = null, holdDir = null, inflight = false, polling = null;
+
+  function showMode(mode) {
+    currentMode = mode;
+    Object.entries(modeButtons).forEach(([name, btn]) => btn.setAttribute('aria-pressed', String(name === mode)));
+  }
+
+  async function setMode(mode) {
+    try {
+      await apiRequest('/api/mode', 'POST', { mode });
+      showMode(mode);
+      statusLine.textContent = 'Modo ' + (mode === 'wheels' ? 'Rodas' : 'Pernas') + ' selecionado.';
+    } catch (error) {
+      statusLine.textContent = 'Não foi possível trocar o modo: ' + error.message;
+    }
+  }
+  modeButtons.wheels.addEventListener('click', () => setMode('wheels'));
+  modeButtons.legs.addEventListener('click', () => setMode('legs'));
+
+  async function sendMove(direction, durationMs) {
+    if (inflight) return;               // evita fila de requisições enquanto a anterior não voltou
+    inflight = true;
+    try {
+      await apiRequest('/api/move', 'POST', { direction, duration_ms: durationMs, mode: currentMode });
+    } catch (error) {
+      statusLine.textContent = 'Movimento não confirmado: ' + error.message;
+      stopHold();
+    } finally {
+      inflight = false;
+    }
+  }
+
+  async function sendStop() {
+    try { await apiRequest('/api/stop', 'POST', {}); statusLine.textContent = 'Parado.'; }
+    catch (error) { statusLine.textContent = 'Parada não confirmada: ' + error.message + '. Desligue a alimentação dos servos se houver movimento.'; }
+  }
+
+  function clearHoldUi() {
+    document.querySelectorAll('#dpad [data-dir]').forEach(b => b.classList.remove('hold'));
+  }
+  function stopHold() {
+    if (holdTimer) { clearInterval(holdTimer); holdTimer = null; }
+    const wasHolding = holdDir !== null;
+    holdDir = null;
+    clearHoldUi();
+    return wasHolding;
+  }
+
+  function startHold(direction, button) {
+    if (document.getElementById('driveBehavior').value === 'timed') {
+      const ms = Math.max(200, Math.min(5000, Number(document.getElementById('driveMs').value) || 1500));
+      sendMove(direction, ms);
+      return;
+    }
+    if (holdDir === direction) return;
+    stopHold();
+    holdDir = direction;
+    if (button) button.classList.add('hold');
+    // Prazo curto reenviado a cada 300 ms: se a página ou o Wi-Fi falhar, o robô para sozinho.
+    sendMove(direction, 700);
+    holdTimer = setInterval(() => sendMove(direction, 700), 300);
+  }
+
+  document.querySelectorAll('#dpad [data-dir]').forEach(button => {
+    button.addEventListener('pointerdown', event => {
+      event.preventDefault();
+      button.setPointerCapture(event.pointerId);
+      startHold(button.dataset.dir, button);
+    });
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(type => {
+      button.addEventListener(type, () => {
+        if (document.getElementById('driveBehavior').value === 'hold' && stopHold()) sendStop();
+      });
+    });
+    button.addEventListener('contextmenu', event => event.preventDefault());
+  });
+  document.getElementById('dpadStop').addEventListener('click', () => { stopHold(); sendStop(); });
+
+  // Teclado: setas/WASD seguram; Espaço para.
+  const keyDirs = { ArrowUp:'forward', w:'forward', W:'forward', ArrowDown:'backward', s:'backward', S:'backward',
+                    ArrowLeft:'left', a:'left', A:'left', ArrowRight:'right', d:'right', D:'right' };
+  window.addEventListener('keydown', event => {
+    if (event.target && ['INPUT','SELECT','TEXTAREA'].includes(event.target.tagName)) return;
+    if (event.key === ' ') { event.preventDefault(); stopHold(); sendStop(); return; }
+    const dir = keyDirs[event.key];
+    if (dir && !event.repeat) { event.preventDefault(); startHold(dir, document.querySelector('#dpad [data-dir="' + dir + '"]')); }
+  });
+  window.addEventListener('keyup', event => {
+    if (keyDirs[event.key] && document.getElementById('driveBehavior').value === 'hold' && stopHold()) sendStop();
+  });
+  // Perder o foco ou esconder a aba para o robô.
+  window.addEventListener('blur', () => { if (stopHold()) sendStop(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden && stopHold()) sendStop(); });
+
+  // ---- Calibração (campos gerados a partir desta tabela) ----
+  const TUNE_FIELDS = [
+    { g:'tuneGeneral', key:'speed_pct', label:'Velocidade geral (%)', min:10, max:100, step:5 },
+    { g:'tuneGeneral', key:'obstacle_mm', label:'Parar rodas a (mm) — 0 desliga', min:0, max:800, step:10 },
+    { g:'tuneLeft', key:'wl_stop', label:'Neutro (µs)', min:1300, max:1900, step:1 },
+    { g:'tuneLeft', key:'wl_cw', label:'Horário (µs)', min:1300, max:1900, step:1 },
+    { g:'tuneLeft', key:'wl_ccw', label:'Anti-horário (µs)', min:1300, max:1900, step:1 },
+    { g:'tuneLeft', key:'wl_trim', label:'Ajuste fino de velocidade (%)', min:50, max:150, step:1 },
+    { g:'tuneLeft', key:'wl_fwd_cw', label:'Frente = horário (CW)', bool:true },
+    { g:'tuneRight', key:'wr_stop', label:'Neutro (µs)', min:1300, max:1900, step:1 },
+    { g:'tuneRight', key:'wr_cw', label:'Horário (µs)', min:1300, max:1900, step:1 },
+    { g:'tuneRight', key:'wr_ccw', label:'Anti-horário (µs)', min:1300, max:1900, step:1 },
+    { g:'tuneRight', key:'wr_trim', label:'Ajuste fino de velocidade (%)', min:50, max:150, step:1 },
+    { g:'tuneRight', key:'wr_fwd_cw', label:'Frente = horário (CW)', bool:true },
+    { g:'tunePosture', key:'leg_sit_l', label:'Sentado: perna esquerda (µs)', min:600, max:2400, step:10 },
+    { g:'tunePosture', key:'leg_sit_r', label:'Sentado: perna direita (µs)', min:600, max:2400, step:10 },
+    { g:'tunePosture', key:'posture_ms', label:'Tempo da troca (ms)', min:300, max:5000, step:100 },
+    { g:'tunePosture', key:'leg_center_l', label:'Em pé: perna esquerda (µs)', min:600, max:2400, step:5 },
+    { g:'tunePosture', key:'leg_center_r', label:'Em pé: perna direita (µs)', min:600, max:2400, step:5 },
+    { g:'tuneLegs', key:'leg_amp', label:'Amplitude da inclinação (µs)', min:20, max:250, step:5 },
+    { g:'tuneLegs', key:'step_ms', label:'Tempo em cada lado (ms)', min:150, max:1500, step:10 },
+    { g:'tuneLegs', key:'push_us', label:'Impulso da roda (µs do neutro)', min:10, max:120, step:5 },
+    { g:'tuneLegs', key:'push_ms', label:'Duração do impulso (ms)', min:50, max:600, step:10 },
+    { g:'tuneLegs', key:'leg_inv_l', label:'Inverter perna esquerda', bool:true },
+    { g:'tuneLegs', key:'leg_inv_r', label:'Inverter perna direita', bool:true },
+  ];
+
+  (function buildTuneForm() {
+    TUNE_FIELDS.forEach(f => {
+      const wrap = document.createElement('div');
+      const id = 'tune_' + f.key;
+      if (f.bool) {
+        wrap.className = 'check';
+        wrap.innerHTML = '<input type="checkbox" id="' + id + '"><label for="' + id + '">' + f.label + '</label>';
+      } else {
+        wrap.className = 'field';
+        wrap.innerHTML = '<label for="' + id + '">' + f.label + '</label><input type="number" id="' + id + '" min="' + f.min + '" max="' + f.max + '" step="' + f.step + '">';
+      }
+      document.getElementById(f.g).appendChild(wrap);
+    });
+  })();
+
+  function fillTune(t) {
+    TUNE_FIELDS.forEach(f => {
+      const el = document.getElementById('tune_' + f.key);
+      if (f.bool) el.checked = !!t[f.key]; else el.value = t[f.key];
+    });
+  }
+  function readTune() {
+    const out = {};
+    TUNE_FIELDS.forEach(f => {
+      const el = document.getElementById('tune_' + f.key);
+      out[f.key] = f.bool ? el.checked : Number(el.value);
+    });
+    return out;
+  }
+
+  async function refreshMotion(withTuning) {
+    const m = await apiRequest('/api/motion');
+    showMode(m.mode);
+    const postureNames = { stand: 'em pé', sit: 'sentado', moving: 'mudando de postura', unknown: 'postura desconhecida (assume em pé)' };
+    motionInfo.textContent = 'Modo: ' + (m.mode === 'wheels' ? 'Rodas' : 'Pernas') + ' · ' + (postureNames[m.posture] || m.posture) + ' · ' + (m.busy ? 'ocupado' : 'parado') + (m.ready ? '' : ' · movimento ainda não pronto');
+    if (withTuning) fillTune(m.tuning);
+    return m;
+  }
+
+  document.getElementById('tuneRead').addEventListener('click', async () => {
+    try { await refreshMotion(true); statusLine.textContent = 'Ajustes lidos do robô.'; }
+    catch (error) { statusLine.textContent = 'Não foi possível ler os ajustes: ' + error.message; }
+  });
+  document.getElementById('tuneApply').addEventListener('click', async () => {
+    try {
+      const data = await apiRequest('/api/tune', 'POST', readTune());
+      fillTune(data.tuning);
+      statusLine.textContent = 'Ajustes aplicados e salvos no ESP32.';
+    } catch (error) {
+      statusLine.textContent = 'Ajustes recusados: ' + error.message + ' (confira os limites de cada campo).';
+    }
+  });
+  document.getElementById('testSit').addEventListener('click', async () => {
+    await setMode('wheels');
+    statusLine.textContent = 'Sentando… (aplique os valores antes, se mudou algum)';
+  });
+  document.getElementById('testStand').addEventListener('click', async () => {
+    await setMode('legs');
+    statusLine.textContent = 'Levantando…';
+  });
+  document.getElementById('tuneReset').addEventListener('click', async () => {
+    if (!confirm('Restaurar os valores padrão do firmware?')) return;
+    try {
+      const data = await apiRequest('/api/tune/reset', 'POST', {});
+      fillTune(data.tuning);
+      statusLine.textContent = 'Valores padrão restaurados.';
+    } catch (error) { statusLine.textContent = 'Não foi possível restaurar: ' + error.message; }
+  });
+  document.getElementById('legsRelease').addEventListener('click', async () => {
+    try { await apiRequest('/api/release', 'POST', {}); statusLine.textContent = 'Servos das pernas soltos.'; }
+    catch (error) { statusLine.textContent = 'Não foi possível soltar as pernas: ' + error.message; }
+  });
+
+  // Ao conectar: lê modo e ajustes; depois atualiza o estado a cada 2 s.
+  async function startMotionSync() {
+    try { await refreshMotion(true); } catch (error) { return; }
+    if (polling) clearInterval(polling);
+    polling = setInterval(() => { refreshMotion(false).catch(() => {}); }, 2000);
+  }
+  document.getElementById('connectDevice').addEventListener('click', startMotionSync);
+  if (window.location.hostname && !['localhost', '127.0.0.1'].includes(window.location.hostname)) startMotionSync();
+  /* DOC FIM — MOVIMENTO */
 </script>
 </body>
-</html>
+</html>

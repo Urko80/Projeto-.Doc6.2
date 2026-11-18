@@ -6,6 +6,7 @@
 #include "display/lcd_display.h"
 #include "display/custom_eyes.h"
 #include "web_servo_api.h"
+#include "doc_motion.h"
 #include "mcp_server.h"
 // DOC INÍCIO — driver do VL53L0X (ver nota no README: não incluído neste repositório)
 #include "vl53l0x_driver.h"
@@ -213,12 +214,110 @@ private:
     }
     // DOC FIM — sensores de toque e distância
 
+    // DOC INÍCIO — comandos de voz de movimento (ferramentas MCP)
+    // O LLM do servidor chama estas ferramentas a partir da fala do usuário
+    // (ex.: "anda para frente", "gira para a esquerda", "modo pernas").
+    static std::string MotionErrorText(esp_err_t err) {
+        if (err == ESP_ERR_INVALID_STATE) {
+            return "Motion is not ready (Wi-Fi/PCA9685 not initialized yet)";
+        }
+        return std::string("Motion command failed: ") + esp_err_to_name(err);
+    }
+
+    void InitializeMotionMcpTools() {
+        // O controlador usa o VL53L0X (se existir) para parar as rodas diante de obstáculos.
+        doc_motion::SetDistanceProvider(
+            [this](uint16_t* mm) { return ReadDistanceMillimeters(mm); });
+
+        auto& mcp = McpServer::GetInstance();
+
+        mcp.AddTool(
+            "self.doc.move.set_mode",
+            "Select how the DOC robot moves and change its posture. 'wheels' = the robot "
+            "folds its legs and sits down on its wheels to roll; 'legs' = the robot stands up "
+            "and walks by rocking on its legs. Changing the posture takes about 2 seconds. "
+            "The mode stays selected until changed and stops any current movement.",
+            PropertyList({Property("mode", kPropertyTypeString)}),
+            [](const PropertyList& properties) -> ToolResult {
+                doc_motion::Mode mode = doc_motion::Mode::kWheels;
+                const std::string text = properties["mode"].value<std::string>();
+                if (!doc_motion::ParseMode(text.c_str(), &mode)) {
+                    return std::unexpected("mode must be 'wheels' or 'legs'");
+                }
+                esp_err_t err = doc_motion::SetMode(mode);
+                if (err != ESP_OK) return std::unexpected(MotionErrorText(err));
+                return std::string("{\"mode\":\"") + doc_motion::ModeName(mode) + "\"}";
+            });
+
+        mcp.AddTool(
+            "self.doc.move.go",
+            "Move the DOC robot in a direction and stop by itself after duration_ms. "
+            "direction: 'forward', 'backward', 'left' (turn left) or 'right' (turn right). "
+            "duration_ms: 200 to 5000 (about 1500 for a short step; call again to keep going). "
+            "mode (optional): 'wheels' or 'legs'; when omitted the current mode is used. "
+            "If the posture must change first (sit down for wheels, stand up for legs) the robot "
+            "does that automatically (about 2 seconds) before moving. "
+            "Use short durations and never move toward people or edges.",
+            PropertyList({
+                Property("direction", kPropertyTypeString),
+                Property("duration_ms", kPropertyTypeInteger, 1500, 200, 5000),
+                Property("mode", kPropertyTypeString, std::string("")),
+            }),
+            [](const PropertyList& properties) -> ToolResult {
+                doc_motion::Dir dir = doc_motion::Dir::kStop;
+                const std::string dir_text = properties["direction"].value<std::string>();
+                if (!doc_motion::ParseDir(dir_text.c_str(), &dir) || dir == doc_motion::Dir::kStop) {
+                    return std::unexpected("direction must be forward, backward, left or right");
+                }
+                const std::string mode_text = properties["mode"].value<std::string>();
+                if (!mode_text.empty()) {
+                    doc_motion::Mode mode = doc_motion::Mode::kWheels;
+                    if (!doc_motion::ParseMode(mode_text.c_str(), &mode)) {
+                        return std::unexpected("mode must be 'wheels' or 'legs'");
+                    }
+                    if (mode != doc_motion::GetMode()) {
+                        esp_err_t err = doc_motion::SetMode(mode);
+                        if (err != ESP_OK) return std::unexpected(MotionErrorText(err));
+                    }
+                }
+                const int duration = properties["duration_ms"].value<int>();
+                esp_err_t err = doc_motion::Move(dir, static_cast<uint32_t>(duration));
+                if (err != ESP_OK) return std::unexpected(MotionErrorText(err));
+                return std::string("{\"moving\":\"") + doc_motion::DirName(dir) +
+                       "\",\"mode\":\"" + doc_motion::ModeName(doc_motion::GetMode()) +
+                       "\",\"duration_ms\":" + std::to_string(duration) + "}";
+            });
+
+        mcp.AddTool(
+            "self.doc.move.stop",
+            "Stop the DOC robot immediately. Use whenever the user says stop, wait or halt.",
+            PropertyList(),
+            [](const PropertyList&) -> ToolResult {
+                doc_motion::Stop();
+                return std::string("{\"stopped\":true}");
+            });
+
+        mcp.AddTool(
+            "self.doc.move.status",
+            "Get the DOC robot motion state: current mode, whether it is moving, and whether motion is ready.",
+            PropertyList(),
+            [](const PropertyList&) -> ToolResult {
+                return std::string("{\"mode\":\"") + doc_motion::ModeName(doc_motion::GetMode()) +
+                       "\",\"busy\":" + (doc_motion::IsBusy() ? "true" : "false") +
+                       ",\"ready\":" + (doc_motion::IsReady() ? "true" : "false") + "}";
+            });
+    }
+    // DOC FIM — voz
+
     // DOC INÍCIO — API web inicia somente após a rede estar conectada
     void HandleNetworkEvent(NetworkEvent event, const std::string& data) {
         if (event == NetworkEvent::Connected && !servo_api_started_) {
             ESP_LOGI(TAG, "Wi-Fi conectado; iniciando API web de servos");
-            DocWebServoApiStart();
-            servo_api_started_ = true;
+            // DOC — se falhar (ex.: PCA9685 não respondeu), tenta de novo no próximo evento.
+            servo_api_started_ = DocWebServoApiStart();
+            if (!servo_api_started_) {
+                ESP_LOGE(TAG, "API web/movimento não iniciou; veja o log do PCA9685");
+            }
         } else if (event == NetworkEvent::Disconnected && servo_api_started_) {
             // Em desconexão, tenta parar os motores e encerra o servidor.
             DocWebServoApiStop();
@@ -311,6 +410,7 @@ public:
             InitializeDistanceSensor();
         }
         InitializeDistanceMcpTool();
+        InitializeMotionMcpTools();  // DOC — voz
         InitializeDisplay();
 
         // A Application registra seu callback durante Initialize().
@@ -325,6 +425,7 @@ public:
     }
 
     ~DocAiS3Cam() override {
+        doc_motion::SetDistanceProvider(nullptr);  // DOC — o lambda captura this
         CloseCamera();
         if (servo_api_started_) {
             DocWebServoApiStop();

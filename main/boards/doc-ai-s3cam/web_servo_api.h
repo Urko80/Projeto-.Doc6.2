@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include <driver/i2c_master.h>
 
 /**
@@ -20,8 +23,9 @@
 extern "C" {
 #endif
 
-/** Inicializa I²C/PCA9685 e inicia o servidor HTTP. Idempotente. */
-void DocWebServoApiStart(void);
+/** Inicializa I²C/PCA9685, controlador de movimento e servidor HTTP. Idempotente.
+ *  Retorna false se algo falhar (nada fica alocado; pode tentar de novo). */
+bool DocWebServoApiStart(void);
 
 /** Para motores contínuos e encerra o servidor HTTP. */
 void DocWebServoApiStop(void);
@@ -32,6 +36,18 @@ void DocWebServoApiStop(void);
  * de DocWebServoApiStart(). O módulo então não cria nem remove esse barramento.
  */
 void DocWebServoApiSetSharedBus(i2c_master_bus_handle_t bus);
+// DOC FIM
+
+/**
+ * DOC INÍCIO — usado por doc_motion.cc. Todas usam o mesmo mutex do PCA9685.
+ *  Rodas: CH1 (esquerda) / CH2 (direita). Atualizam também o watchdog das rodas.
+ *  Pernas: CH0 (esquerda) / CH3 (direita), limites 1250..1750 us validados aqui.
+ */
+bool DocServoIsReady(void);
+void DocServoSetWheelStop(uint16_t left_us, uint16_t right_us);
+esp_err_t DocServoWheelsWrite(uint16_t left_us, uint16_t right_us);
+esp_err_t DocServoLegsWrite(uint16_t left_us, uint16_t right_us);
+esp_err_t DocServoLegsRelease(void);
 // DOC FIM
 
 #ifdef __cplusplus

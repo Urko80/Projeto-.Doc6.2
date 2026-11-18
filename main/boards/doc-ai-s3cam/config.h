@@ -100,4 +100,32 @@
 #define DOC_WHEEL_RIGHT_CCW_US 1800
 // DOC FIM
 
+// DOC INÍCIO — movimento (valores INICIAIS; o painel web ajusta e salva em NVS)
+// Os servos das rodas estão montados em espelho: "frente" exige sentidos opostos.
+// Se o robô andar para trás, inverta o sentido pelo painel (aba Calibração).
+#define DOC_WHEEL_LEFT_FORWARD_IS_CW   true
+#define DOC_WHEEL_RIGHT_FORWARD_IS_CW  false
+#define DOC_MOTION_SPEED_PCT           100   // 10..100 (% do deslocamento calibrado)
+// Modo Pernas: inclinação alternada (SG90 CH0/CH3) + leve impulso nas rodas.
+#define DOC_LEG_CENTER_LEFT_US         1500
+#define DOC_LEG_CENTER_RIGHT_US        1500
+#define DOC_LEG_LEFT_INVERTED          false
+#define DOC_LEG_RIGHT_INVERTED         true  // servos espelhados: inclinação igual = pulsos opostos
+#define DOC_LEG_TILT_AMPLITUDE_US      100   // começa pequeno (~9 graus); aumente aos poucos
+#define DOC_STEP_HOLD_MS               450   // tempo em cada lado
+#define DOC_STEP_PUSH_US               70    // deslocamento da roda em relação ao neutro
+#define DOC_STEP_PUSH_MS               200   // duração do impulso
+#define DOC_OBSTACLE_STOP_MM           0     // 0 = desligado; VL53L0X para as rodas se < valor
+// Postura: EM PÉ (Modo Pernas) usa o "centro" das pernas; SENTADO (Modo Rodas) usa os pulsos abaixo.
+// Ao trocar de modo, as pernas giram devagar até a outra postura (as rodas esperam).
+// Valores iniciais CONSERVADORES (+/-250 us do centro): aumente pela aba Calibração, de 50 em 50,
+// até os pés dobrarem e as rodas tocarem o chão (cerca de 90 graus).
+#define DOC_LEG_SIT_LEFT_US            1750
+#define DOC_LEG_SIT_RIGHT_US           1250
+#define DOC_POSTURE_MS                 1500  // duração da transição em pé <-> sentado
+// Limite absoluto aceito para as pernas nas posturas e na marcha (SG90: curso nominal 500..2500).
+#define DOC_LEG_ABS_MIN_US             600
+#define DOC_LEG_ABS_MAX_US             2400
+// DOC FIM
+
 #endif // DOC_AI_S3CAM_CONFIG_H
